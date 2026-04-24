@@ -27,14 +27,15 @@ log = logging.getLogger(__name__)
 # Configuration
 # ---------------------------------------------------------------------------
 
-REDIS_HOST: str = os.environ.get("REDIS_HOST", "localhost")
-REDIS_PORT: int = int(os.environ.get("REDIS_PORT", "6379"))
-REDIS_DB:   int = int(os.environ.get("REDIS_DB", "0"))
-QUEUE_KEY:  str = os.environ.get("REDIS_QUEUE_KEY", "cerebrum:events")
+REDIS_HOST:     str           = os.environ.get("REDIS_HOST", "localhost")
+REDIS_PORT:     int           = int(os.environ.get("REDIS_PORT", "6379"))
+REDIS_DB:       int           = int(os.environ.get("REDIS_DB", "0"))
+REDIS_PASSWORD: Optional[str] = os.environ.get("REDIS_PASSWORD", None)  # ✅ مضاف
+QUEUE_KEY:      str           = os.environ.get("REDIS_QUEUE_KEY", "cerebrum:events")
 
 # Retry parameters
-MAX_RETRIES:   int   = int(os.environ.get("QUEUE_MAX_RETRIES", "5"))
-INITIAL_DELAY: float = float(os.environ.get("QUEUE_INITIAL_DELAY", "0.5"))  # seconds
+MAX_RETRIES:    int   = int(os.environ.get("QUEUE_MAX_RETRIES", "5"))
+INITIAL_DELAY:  float = float(os.environ.get("QUEUE_INITIAL_DELAY", "0.5"))  # seconds
 BACKOFF_FACTOR: float = 2.0   # doubles each attempt
 MAX_DELAY:      float = 30.0  # cap at 30 s
 
@@ -56,8 +57,8 @@ def _get_pool() -> redis.ConnectionPool:
             host=REDIS_HOST,
             port=REDIS_PORT,
             db=REDIS_DB,
-            password=REDIS_PASSWORD,        # ✅ أضف السطر ده
-            decode_responses=True,   # strings, not bytes
+            password=REDIS_PASSWORD,       # ✅ مضاف
+            decode_responses=True,         # strings, not bytes
             max_connections=20,
             socket_connect_timeout=5,
             socket_timeout=5,
