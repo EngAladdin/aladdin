@@ -2,7 +2,7 @@
 fastapi==0.111.0          # HTTP ingestor API
 uvicorn[standard]==0.29.0 # ASGI server (includes uvloop + httptools)
 
-# ─── Data validation ──────────────────────────────────────────────────────────
+# ─── Data validation ─────────────────────────────────────────────────────────
 pydantic==2.7.1           # Schema validation & serialization (v2)
 
 # ─── Queue / storage ──────────────────────────────────────────────────────────
