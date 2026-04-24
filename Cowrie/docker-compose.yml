@@ -1,0 +1,23 @@
+services:
+  cowrie:
+    image: cowrie/cowrie:latest
+    container_name: cowrie
+    ports:
+      - "2222:2222"
+      - "2223:2223"
+    volumes:
+      - ./cowrie-logs:/cowrie/cowrie-git/var/log/cowrie
+    restart: unless-stopped
+
+  sender:
+    image: python:3.12-slim
+    container_name: cowrie-sender
+    volumes:
+      - ./cowrie-logs:/logs
+      - ./sender.py:/app/sender.py
+    working_dir: /app
+    command: >
+      sh -c "pip install requests -q && python sender.py"
+    depends_on:
+      - cowrie
+    restart: unless-stopped
