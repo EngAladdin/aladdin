@@ -56,6 +56,7 @@ def _get_pool() -> redis.ConnectionPool:
             host=REDIS_HOST,
             port=REDIS_PORT,
             db=REDIS_DB,
+            password=REDIS_PASSWORD,        # ✅ أضف السطر ده
             decode_responses=True,   # strings, not bytes
             max_connections=20,
             socket_connect_timeout=5,
