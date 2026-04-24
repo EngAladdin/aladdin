@@ -6,6 +6,12 @@ level = "info"
   filename = "/var/log/honeytrap/events.jsonl"
   format = "json"
 
+[pushers.http]
+  enabled = true
+  url = "https://ingestion-production-c968.up.railway.app/ingest/event"
+  method = "POST"
+  content_type = "application/json"
+
 [listeners.ssh]
   enabled = true
   port = 2222
