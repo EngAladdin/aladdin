@@ -43,6 +43,5 @@ EXPOSE 8000
 HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
     CMD curl -f http://localhost:8000/health || exit 1
 
-COPY start.sh ./start.sh
-RUN chmod +x ./start.sh
+COPY --chmod=755 start.sh ./start.sh
 CMD ["./start.sh"]
