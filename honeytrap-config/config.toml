@@ -1,0 +1,15 @@
+[logging]
+level = "info"
+
+[pushers.file]
+  enabled = true
+  filename = "/var/log/honeytrap/events.jsonl"
+  format = "json"
+
+[listeners.ssh]
+  enabled = true
+  port = 2222
+
+[listeners.http]
+  enabled = true
+  port = 8080
