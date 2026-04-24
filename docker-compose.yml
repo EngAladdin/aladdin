@@ -1,0 +1,57 @@
+﻿version: '3.8'
+
+services:
+  redis:
+    image: redis:7-alpine
+    container_name: cerebrum-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    command: redis-server --appendonly yes
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  ingestion-http:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: cerebrum-ingest-http
+    ports:
+      - "8000:8000"
+    environment:
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - REDIS_DB=0
+      - HMAC_SECRET=dev_secret_key_123
+      - LOG_LEVEL=INFO
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # Optional: file ingestor - يمكن تشغيله بشكل منفصل إذا لزم الأمر
+  # ingestion-file:
+  #   build:
+  #     context: .
+  #     dockerfile: Dockerfile
+  #   container_name: cerebrum-ingest-file
+  #   environment:
+  #     - REDIS_HOST=redis
+  #     - REDIS_PORT=6379
+  #     - REDIS_DB=0
+  #     - LOG_FILE_PATH=/var/log/honeytrap/events.jsonl
+  #   volumes:
+  #     - ./honeytrap-logs:/var/log/honeytrap:ro
+  #   depends_on:
+  #     redis:
+  #       condition: service_healthy
+  #   restart: unless-stopped
+  #   command: python -m ingestion.file_tail_ingest
+
+volumes:
+  redis_data:

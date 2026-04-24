@@ -1,0 +1,15 @@
+# ─── Web framework ────────────────────────────────────────────────────────────
+fastapi==0.111.0          # HTTP ingestor API
+uvicorn[standard]==0.29.0 # ASGI server (includes uvloop + httptools)
+
+# ─── Data validation ──────────────────────────────────────────────────────────
+pydantic==2.7.1           # Schema validation & serialization (v2)
+
+# ─── Queue / storage ──────────────────────────────────────────────────────────
+redis==5.0.4              # Redis client
+
+# ─── HTTP client (HttpAdapter) ────────────────────────────────────────────────
+requests==2.32.2          # Sync HTTP — used by http_adapter.py
+
+# ─── Utilities ────────────────────────────────────────────────────────────────
+python-dotenv==1.0.1      # Load .env into os.environ at startup
