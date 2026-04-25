@@ -1,0 +1,28 @@
+{
+  "connection": {
+    "type": "connection",
+    "timestamp": "2026-04-24T09:00:00Z",
+    "source-ip": "203.0.113.5",
+    "source-port": 12345,
+    "destination-ip": "10.0.0.1",
+    "destination-port": 22,
+    "protocol": "tcp",
+    "sensor-id": "ht-01"
+  },
+  "ssh_auth": {
+    "type": "ssh-auth",
+    "timestamp": "2026-04-24T09:30:00Z",
+    "source-ip": "203.0.113.10",
+    "username": "admin",
+    "password": "password123",
+    "sensor-id": "ht-02"
+  },
+  "http_get": {
+    "type": "http-get",
+    "timestamp": "2026-04-24T10:30:00Z",
+    "source-ip": "8.8.8.8",
+    "uri": "/wp-admin",
+    "method": "GET",
+    "sensor-id": "ht-01"
+  }
+}
