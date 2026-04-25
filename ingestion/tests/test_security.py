@@ -131,4 +131,53 @@ class TestSecurity:
     
     def test_is_ip_allowed_invalid_ip(self):
         """Should return False for invalid IP format."""
-        with patch.dict(os.environ, {'ALLOWED_IPS
+        with patch.dict(os.environ, {'ALLOWED_IPS': '10.0.0.0/8'}):
+            import importlib
+            importlib.reload(security)
+            
+            assert security.is_ip_allowed("not.an.ip") is False
+            assert security.is_ip_allowed("999.999.999.999") is False
+    
+    def test_validate_request_success(self):
+        """Should return True for valid request."""
+        with patch.dict(os.environ, {
+            'HMAC_SECRET': 'test_secret',
+            'ALLOWED_IPS': '127.0.0.1',
+            'FORCE_DISABLE_HMAC': 'false'
+        }):
+            import importlib
+            importlib.reload(security)
+            
+            payload = b"test"
+            sig = security.sign_payload(payload)
+            
+            ok, reason = security.validate_request("127.0.0.1", payload, sig)
+            assert ok is True
+            assert reason == ""
+    
+    def test_validate_request_ip_blocked(self):
+        """Should return False for blocked IP."""
+        with patch.dict(os.environ, {
+            'HMAC_SECRET': 'test_secret',
+            'ALLOWED_IPS': '127.0.0.1'
+        }):
+            import importlib
+            importlib.reload(security)
+            
+            ok, reason = security.validate_request("1.2.3.4", b"test", "sig")
+            assert ok is False
+            assert "IP" in reason
+    
+    def test_validate_request_invalid_signature(self):
+        """Should return False for invalid signature."""
+        with patch.dict(os.environ, {
+            'HMAC_SECRET': 'test_secret',
+            'ALLOWED_IPS': '127.0.0.1',
+            'FORCE_DISABLE_HMAC': 'false'
+        }):
+            import importlib
+            importlib.reload(security)
+            
+            ok, reason = security.validate_request("127.0.0.1", b"test", "invalid")
+            assert ok is False
+            assert "signature" in reason.lower()
