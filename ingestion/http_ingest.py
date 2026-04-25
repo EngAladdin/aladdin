@@ -1,17 +1,5 @@
 """
 http_ingest.py — FastAPI HTTP webhook endpoint for Honeytrap events.
-
-Security model (per-request)
------------------------------
-1. IP allow-list check    — reject non-Honeytrap hosts immediately.
-2. HMAC-SHA256 verification — reject tampered or unsigned bodies.
-3. Pydantic validation    — reject structurally invalid payloads.
-4. Normalization          — convert to Cerebrum format.
-5. Redis push             — at-least-once delivery with retry/backoff.
-
-Run locally
------------
-    uvicorn ingestion.http_ingest:app --host 0.0.0.0 --port 8000
 """
 import json
 import logging
@@ -25,29 +13,22 @@ from ingestion.normalize import normalize
 from ingestion.queue import ping, push_event, queue_depth, get_client, QUEUE_KEY
 from ingestion.security import validate_request
 
-# ---------------------------------------------------------------------------
-# Logging
-# ---------------------------------------------------------------------------
 logging.basicConfig(
     level=os.environ.get("LOG_LEVEL", "INFO"),
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
 )
 log = logging.getLogger("http_ingest")
 
-# ---------------------------------------------------------------------------
-# App
-# ---------------------------------------------------------------------------
+HISTORY_KEY: str = os.environ.get("REDIS_HISTORY_KEY", "cerebrum:history")
+HISTORY_MAX: int = int(os.environ.get("REDIS_HISTORY_MAX", "2000"))
+
 app = FastAPI(
     title="Cerebrum Event Ingestor",
-    description="Accepts Honeytrap webhook events, validates, normalizes, and queues them.",
     version="1.0.0",
     docs_url="/docs" if os.environ.get("DOCS_ENABLED", "false").lower() == "true" else None,
     redoc_url=None,
 )
 
-# ---------------------------------------------------------------------------
-# CORS — allow Dashboard (and any origin) to call this API from the browser
-# ---------------------------------------------------------------------------
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -57,10 +38,6 @@ app.add_middleware(
 )
 
 
-# ---------------------------------------------------------------------------
-# Helper: extract client IP through common proxy headers
-# ---------------------------------------------------------------------------
-
 def _get_client_ip(request: Request) -> str:
     xff = request.headers.get("x-forwarded-for")
     if xff:
@@ -68,26 +45,14 @@ def _get_client_ip(request: Request) -> str:
     return request.client.host if request.client else "unknown"
 
 
-# ---------------------------------------------------------------------------
-# Routes — ingest
-# ---------------------------------------------------------------------------
-
-@app.post(
-    "/ingest/event",
-    status_code=status.HTTP_202_ACCEPTED,
-    summary="Accept a single Honeytrap event",
-)
+@app.post("/ingest/event", status_code=status.HTTP_202_ACCEPTED)
 async def ingest_event(
     request: Request,
-    x_honeytrap_signature: str = Header(
-        default="",
-        alias="x-honeytrap-signature",
-        description="HMAC-SHA256 of the raw request body (hex or sha256=hex)",
-    ),
+    x_honeytrap_signature: str = Header(default="", alias="x-honeytrap-signature"),
 ):
     body: bytes = await request.body()
-
     client_ip = _get_client_ip(request)
+
     ok, reason = validate_request(client_ip, body, x_honeytrap_signature)
     if not ok:
         log.warning("Rejected request from %s: %s", client_ip, reason)
@@ -96,11 +61,8 @@ async def ingest_event(
     try:
         raw_event = json.loads(body)
     except json.JSONDecodeError as exc:
-        log.warning("Malformed JSON from %s: %s", client_ip, exc)
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Request body is not valid JSON: {exc}",
-        )
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST,
+                            detail=f"Request body is not valid JSON: {exc}")
 
     events = raw_event if isinstance(raw_event, list) else [raw_event]
     queued = 0
@@ -109,18 +71,28 @@ async def ingest_event(
     for event in events:
         normalized = normalize(event)
         if normalized is None:
-            log.warning("Normalization failed for event from %s", client_ip)
             failed += 1
             continue
 
+        # 1. Push to Cerebrum queue (consumed by Cerebrum)
         ok = push_event(normalized)
         if ok:
             queued += 1
         else:
-            log.error("Queue push failed for event %s", normalized.get("event_id"))
             failed += 1
+            continue
 
-    log.info("Ingest from %s — total=%d queued=%d failed=%d", client_ip, len(events), queued, failed)
+        # 2. Append to history list (read by Dashboard — never drained)
+        try:
+            client = get_client()
+            payload = json.dumps(normalized, default=str)
+            client.rpush(HISTORY_KEY, payload)
+            client.ltrim(HISTORY_KEY, -HISTORY_MAX, -1)
+        except Exception as exc:
+            log.warning("Could not write to history key: %s", exc)
+
+    log.info("Ingest from %s — total=%d queued=%d failed=%d",
+             client_ip, len(events), queued, failed)
 
     return JSONResponse(
         status_code=status.HTTP_202_ACCEPTED,
@@ -128,96 +100,69 @@ async def ingest_event(
     )
 
 
-# ---------------------------------------------------------------------------
-# Routes — dashboard API
-# ---------------------------------------------------------------------------
-
-@app.get("/api/events", summary="Get events from Redis queue for Dashboard")
+@app.get("/api/events")
 async def get_api_events(limit: int = 200):
-    """
-    Returns up to `limit` recent events from the Redis queue.
-    Called by the Dashboard frontend to display live data.
-    """
     try:
         client = get_client()
-        raw_list = client.lrange(QUEUE_KEY, -limit, -1)
+        raw_list = client.lrange(HISTORY_KEY, -limit, -1)
         events = []
         for raw in raw_list:
             try:
                 events.append(json.loads(raw))
             except json.JSONDecodeError:
                 pass
-        events.reverse()  # newest first
+        events.reverse()
         return {"success": True, "events": events, "total": len(events)}
     except Exception as exc:
-        log.error("Failed to read events from Redis: %s", exc)
+        log.error("Failed to read history: %s", exc)
         return JSONResponse(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             content={"success": False, "events": [], "error": str(exc)},
         )
 
 
-@app.get("/api/stats", summary="Aggregated stats from Redis queue")
+@app.get("/api/stats")
 async def get_api_stats():
-    """Basic aggregated statistics over all queued events."""
     try:
         client = get_client()
-        raw_list = client.lrange(QUEUE_KEY, 0, -1)
+        raw_list = client.lrange(HISTORY_KEY, 0, -1)
         by_type: dict = {}
         by_ip: dict = {}
         for raw in raw_list:
             try:
                 e = json.loads(raw)
-                t  = e.get("event_type", "unknown")
-                ip = e.get("src_ip", "unknown")
-                by_type[t]  = by_type.get(t, 0)  + 1
-                by_ip[ip]   = by_ip.get(ip, 0)   + 1
+                by_type[e.get("event_type","unknown")] = by_type.get(e.get("event_type","unknown"), 0) + 1
+                by_ip[e.get("src_ip","unknown")] = by_ip.get(e.get("src_ip","unknown"), 0) + 1
             except json.JSONDecodeError:
                 pass
-        return {
-            "success": True,
-            "stats": {"total": len(raw_list), "by_type": by_type, "by_ip": by_ip},
-        }
+        return {"success": True, "stats": {"total": len(raw_list), "by_type": by_type, "by_ip": by_ip}}
     except Exception as exc:
-        log.error("Failed to compute stats: %s", exc)
-        return JSONResponse(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            content={"success": False, "error": str(exc)},
-        )
+        return JSONResponse(status_code=503, content={"success": False, "error": str(exc)})
 
 
-# ---------------------------------------------------------------------------
-# Routes — health / metrics
-# ---------------------------------------------------------------------------
-
-@app.get("/health", summary="Health check")
+@app.get("/health")
 async def health():
     redis_ok = ping()
-    depth    = queue_depth() if redis_ok else -1
-    payload  = {
-        "status":      "ok" if redis_ok else "degraded",
-        "redis":       "up" if redis_ok else "down",
+    depth = queue_depth() if redis_ok else -1
+    try:
+        history_len = get_client().llen(HISTORY_KEY) if redis_ok else 0
+    except Exception:
+        history_len = 0
+    payload = {
+        "status": "ok" if redis_ok else "degraded",
+        "redis": "up" if redis_ok else "down",
         "queue_depth": depth,
+        "history_size": history_len,
     }
     code = status.HTTP_200_OK if redis_ok else status.HTTP_503_SERVICE_UNAVAILABLE
     return JSONResponse(status_code=code, content=payload)
 
 
-@app.get("/metrics", summary="Basic queue metrics")
+@app.get("/metrics")
 async def metrics():
     return {"queue_depth": queue_depth()}
 
 
-# ---------------------------------------------------------------------------
-# Entry point
-# ---------------------------------------------------------------------------
-
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(
-        "ingestion.http_ingest:app",
-        host="0.0.0.0",
-        port=8000,
-        workers=1,
-        log_level="info",
-    )
+    uvicorn.run("ingestion.http_ingest:app", host="0.0.0.0", port=8000, workers=1, log_level="info")
