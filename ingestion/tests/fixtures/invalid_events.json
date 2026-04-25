@@ -1,0 +1,18 @@
+{
+  "missing_type": {
+    "timestamp": "2026-04-24T10:00:00Z",
+    "src_ip": "1.1.1.1"
+  },
+  "empty_object": {},
+  "array_input": ["not", "valid", "event"],
+  "malformed_timestamp": {
+    "eventid": "cowrie.test",
+    "timestamp": "invalid-date-format",
+    "src_ip": "1.1.1.1"
+  },
+  "null_values": {
+    "eventid": "cowrie.test",
+    "src_ip": null,
+    "timestamp": null
+  }
+}
