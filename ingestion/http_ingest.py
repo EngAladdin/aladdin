@@ -12,31 +12,17 @@ Security model (per-request)
 Run locally
 -----------
     uvicorn ingestion.http_ingest:app --host 0.0.0.0 --port 8000
-
-Or via Docker Compose (see docker-compose.yml).
 """
-# أضف هذا في بداية الملف بعد imports
-import sys
-
-# منع استخدام workers متعددين إذا كانوا يسببون مشاكل
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(
-        "ingestion.http_ingest:app",
-        host="0.0.0.0",
-        port=8000,
-        workers=1,  # قوة على worker واحد للاستقرار
-        log_level="info"
-    )
 import json
 import logging
 import os
 
 from fastapi import FastAPI, Header, HTTPException, Request, status
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from ingestion.normalize import normalize
-from ingestion.queue import ping, push_event, queue_depth
+from ingestion.queue import ping, push_event, queue_depth, get_client, QUEUE_KEY
 from ingestion.security import validate_request
 
 # ---------------------------------------------------------------------------
@@ -55,9 +41,19 @@ app = FastAPI(
     title="Cerebrum Event Ingestor",
     description="Accepts Honeytrap webhook events, validates, normalizes, and queues them.",
     version="1.0.0",
-    # Don't expose docs in production — set DOCS_ENABLED=true only in dev
     docs_url="/docs" if os.environ.get("DOCS_ENABLED", "false").lower() == "true" else None,
     redoc_url=None,
+)
+
+# ---------------------------------------------------------------------------
+# CORS — allow Dashboard (and any origin) to call this API from the browser
+# ---------------------------------------------------------------------------
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=False,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 
@@ -66,19 +62,14 @@ app = FastAPI(
 # ---------------------------------------------------------------------------
 
 def _get_client_ip(request: Request) -> str:
-    """
-    Resolve the real client IP, honouring X-Forwarded-For when behind a
-    trusted reverse proxy.  Falls back to the direct TCP peer address.
-    """
     xff = request.headers.get("x-forwarded-for")
     if xff:
-        # X-Forwarded-For can be a comma-separated chain; leftmost is original
         return xff.split(",")[0].strip()
     return request.client.host if request.client else "unknown"
 
 
 # ---------------------------------------------------------------------------
-# Routes
+# Routes — ingest
 # ---------------------------------------------------------------------------
 
 @app.post(
@@ -94,27 +85,14 @@ async def ingest_event(
         description="HMAC-SHA256 of the raw request body (hex or sha256=hex)",
     ),
 ):
-    """
-    Accept a single JSON event from a Honeytrap instance.
-
-    Expected headers
-    ----------------
-    * Content-Type: application/json
-    * X-Honeytrap-Signature: sha256=<hex>  (or just the hex digest)
-
-    Returns 202 Accepted on success, 4xx on client errors.
-    """
-    # --- Read body first (needed for both HMAC and parsing) ---
     body: bytes = await request.body()
 
-    # --- Security: IP + HMAC ---
     client_ip = _get_client_ip(request)
     ok, reason = validate_request(client_ip, body, x_honeytrap_signature)
     if not ok:
         log.warning("Rejected request from %s: %s", client_ip, reason)
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=reason)
 
-    # --- Parse JSON body ---
     try:
         raw_event = json.loads(body)
     except json.JSONDecodeError as exc:
@@ -124,9 +102,7 @@ async def ingest_event(
             detail=f"Request body is not valid JSON: {exc}",
         )
 
-    # Support single event dict OR a list of events (batch ingest)
     events = raw_event if isinstance(raw_event, list) else [raw_event]
-
     queued = 0
     failed = 0
 
@@ -144,36 +120,81 @@ async def ingest_event(
             log.error("Queue push failed for event %s", normalized.get("event_id"))
             failed += 1
 
-    log.info(
-        "Ingest from %s — total=%d queued=%d failed=%d",
-        client_ip,
-        len(events),
-        queued,
-        failed,
-    )
+    log.info("Ingest from %s — total=%d queued=%d failed=%d", client_ip, len(events), queued, failed)
 
-    # Return 202 even if some events failed (caller shouldn't retry everything)
     return JSONResponse(
         status_code=status.HTTP_202_ACCEPTED,
-        content={
-            "status": "accepted",
-            "queued": queued,
-            "failed": failed,
-            "total": len(events),
-        },
+        content={"status": "accepted", "queued": queued, "failed": failed, "total": len(events)},
     )
 
+
+# ---------------------------------------------------------------------------
+# Routes — dashboard API
+# ---------------------------------------------------------------------------
+
+@app.get("/api/events", summary="Get events from Redis queue for Dashboard")
+async def get_api_events(limit: int = 200):
+    """
+    Returns up to `limit` recent events from the Redis queue.
+    Called by the Dashboard frontend to display live data.
+    """
+    try:
+        client = get_client()
+        raw_list = client.lrange(QUEUE_KEY, -limit, -1)
+        events = []
+        for raw in raw_list:
+            try:
+                events.append(json.loads(raw))
+            except json.JSONDecodeError:
+                pass
+        events.reverse()  # newest first
+        return {"success": True, "events": events, "total": len(events)}
+    except Exception as exc:
+        log.error("Failed to read events from Redis: %s", exc)
+        return JSONResponse(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            content={"success": False, "events": [], "error": str(exc)},
+        )
+
+
+@app.get("/api/stats", summary="Aggregated stats from Redis queue")
+async def get_api_stats():
+    """Basic aggregated statistics over all queued events."""
+    try:
+        client = get_client()
+        raw_list = client.lrange(QUEUE_KEY, 0, -1)
+        by_type: dict = {}
+        by_ip: dict = {}
+        for raw in raw_list:
+            try:
+                e = json.loads(raw)
+                t  = e.get("event_type", "unknown")
+                ip = e.get("src_ip", "unknown")
+                by_type[t]  = by_type.get(t, 0)  + 1
+                by_ip[ip]   = by_ip.get(ip, 0)   + 1
+            except json.JSONDecodeError:
+                pass
+        return {
+            "success": True,
+            "stats": {"total": len(raw_list), "by_type": by_type, "by_ip": by_ip},
+        }
+    except Exception as exc:
+        log.error("Failed to compute stats: %s", exc)
+        return JSONResponse(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            content={"success": False, "error": str(exc)},
+        )
+
+
+# ---------------------------------------------------------------------------
+# Routes — health / metrics
+# ---------------------------------------------------------------------------
 
 @app.get("/health", summary="Health check")
 async def health():
-    """
-    Lightweight health-check used by Docker / load balancers.
-    Returns 200 when Redis is reachable, 503 otherwise.
-    """
     redis_ok = ping()
     depth    = queue_depth() if redis_ok else -1
-
-    payload = {
+    payload  = {
         "status":      "ok" if redis_ok else "degraded",
         "redis":       "up" if redis_ok else "down",
         "queue_depth": depth,
@@ -184,17 +205,19 @@ async def health():
 
 @app.get("/metrics", summary="Basic queue metrics")
 async def metrics():
-    """
-    Expose queue depth for Prometheus-style scraping or manual inspection.
-    """
     return {"queue_depth": queue_depth()}
-# أضف في نهاية الملف
+
+
+# ---------------------------------------------------------------------------
+# Entry point
+# ---------------------------------------------------------------------------
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(
         "ingestion.http_ingest:app",
         host="0.0.0.0",
         port=8000,
-        workers=1,  # Force single worker
-        log_level="info"
+        workers=1,
+        log_level="info",
     )
